@@ -7,11 +7,13 @@ dotenv.config();
 
 const app = express();
 
+
+
 app.use(cors({
   origin: ['https://claude.ai', 'https://staging.claude.ai'], 
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-mcp-protocol-version'], 
-  exposedHeaders: ['x-mcp-protocol-version']
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-mcp-protocol-version'], // এই হেডারটি যোগ করা হয়েছে
+  exposedHeaders: ['x-mcp-protocol-version'] // এটি ক্লডকে প্রোটোকল ভার্সন দেখতে সাহায্য করে
 }));
 
 app.use(express.json());
