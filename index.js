@@ -7,13 +7,12 @@ dotenv.config();
 
 const app = express();
 
-
-
+// CORS setup - Claude.ai এর জন্য
 app.use(cors({
-  origin: ['https://claude.ai', 'https://staging.claude.ai'], 
+  origin: '*',
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-mcp-protocol-version'], // এই হেডারটি যোগ করা হয়েছে
-  exposedHeaders: ['x-mcp-protocol-version'] // এটি ক্লডকে প্রোটোকল ভার্সন দেখতে সাহায্য করে
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
 }));
 
 app.use(express.json());
@@ -21,82 +20,123 @@ app.use(express.json());
 const EVENTOFFICE_API_KEY = process.env.EVENTOFFICE_API_KEY;
 const BASE_URL = 'https://rental.software/api6';
 
-// SSE Endpoint
+// Store active connections
+const connections = new Map();
+
+// SSE endpoint - Claude.ai এখানে connect করবে
 app.get('/sse', (req, res) => {
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-    'X-Accel-Buffering': 'no'
-  });
+  console.log('New SSE connection established');
 
- app.get('/sse', (req, res) => {
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-    'X-Accel-Buffering': 'no' // রেলওয়ের বাফারিং বন্ধ করতে এটি মাস্ট
-  });
+  // Set SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
 
-  // ১. প্রথমেই এই বিশেষ ইভেন্টটি পাঠাতে হবে
-  res.write(`event: endpoint\ndata: /message\n\n`); 
+  // Generate connection ID
+  const connectionId = Date.now().toString();
+  connections.set(connectionId, res);
 
-  // ২. এরপর তোমার ইনট মেসেজ (initMessage) পাঠাও
-  const initMessage = {
+  // Send initial connection success
+  const initEvent = {
     jsonrpc: '2.0',
-    method: 'initialized',
+    method: 'connected',
     params: {
-      protocolVersion: '2024-11-05',
-      capabilities: { tools: {} },
-      serverInfo: { name: 'eventoffice-mcp-server', version: '1.0.0' }
+      connectionId: connectionId,
+      serverInfo: {
+        name: 'eventoffice-mcp-server',
+        version: '1.0.0'
+      }
     }
   };
-  res.write(`data: ${JSON.stringify(initMessage)}\n\n`);
+  
+  res.write(`data: ${JSON.stringify(initEvent)}\n\n`);
 
-  // ৩. হার্টবিট ইন্টারভাল (৩০ সেকেন্ডের বদলে ১৫ সেকেন্ড করো, রেলওয়েতে কানেকশন ড্রপ রোধে)
-  const keepAlive = setInterval(() => {
-    res.write(':keepalive\n\n');
-  }, 15000);
+  // Keep-alive ping every 30 seconds
+  const keepAliveInterval = setInterval(() => {
+    res.write(':ping\n\n');
+  }, 30000);
 
+  // Clean up on connection close
   req.on('close', () => {
-    clearInterval(keepAlive);
+    console.log('SSE connection closed');
+    clearInterval(keepAliveInterval);
+    connections.delete(connectionId);
     res.end();
   });
 });
 
-// MCP JSON-RPC endpoint
-app.post('/message', async (req, res) => {
+// Main RPC endpoint - Claude.ai এখানে requests পাঠাবে
+app.post('/rpc', async (req, res) => {
   try {
     const { jsonrpc, id, method, params } = req.body;
-    console.log('Received request:', { method, params });
+
+    console.log('Received RPC request:', { method, params });
 
     let result;
+
     switch (method) {
+      case 'initialize':
+        result = {
+          protocolVersion: '2024-11-05',
+          capabilities: {
+            tools: {}
+          },
+          serverInfo: {
+            name: 'eventoffice-mcp-server',
+            version: '1.0.0'
+          }
+        };
+        break;
+
       case 'tools/list':
         result = {
           tools: [
             {
               name: 'get_leads',
-              description: 'Get leads from EventOffice.',
+              description: 'Get leads/events from EventOffice. Can filter by status (booked, pending, cancelled, tentative).',
               inputSchema: {
                 type: 'object',
                 properties: {
-                  status: { type: 'string', enum: ['booked', 'pending', 'cancelled', 'tentative', 'all'] },
-                  limit: { type: 'number', default: 20 }
+                  status: {
+                    type: 'string',
+                    description: 'Filter by lead status',
+                    enum: ['booked', 'pending', 'cancelled', 'tentative', 'all']
+                  },
+                  limit: {
+                    type: 'number',
+                    description: 'Number of results to return',
+                    default: 20
+                  }
                 }
               }
             },
             {
               name: 'create_lead',
-              description: 'Create a new lead in EventOffice',
+              description: 'Create a new lead/event in EventOffice',
               inputSchema: {
                 type: 'object',
                 properties: {
-                  customer_name: { type: 'string' },
-                  email: { type: 'string' },
-                  event_date: { type: 'string' }
+                  customer_name: { type: 'string', description: 'Customer full name' },
+                  email: { type: 'string', description: 'Customer email' },
+                  phone: { type: 'string', description: 'Phone number (optional)' },
+                  event_date: { type: 'string', description: 'Event date (YYYY-MM-DD)' },
+                  event_type: { type: 'string', description: 'Type of event' },
+                  notes: { type: 'string', description: 'Additional notes' }
                 },
                 required: ['customer_name', 'email', 'event_date']
+              }
+            },
+            {
+              name: 'get_inventory',
+              description: 'Get rental inventory items from EventOffice',
+              inputSchema: {
+                type: 'object',
+                properties: {
+                  category: { type: 'string', description: 'Filter by category' },
+                  search: { type: 'string', description: 'Search by name' }
+                }
               }
             }
           ]
@@ -111,29 +151,180 @@ app.post('/message', async (req, res) => {
         throw new Error(`Unknown method: ${method}`);
     }
 
-    res.json({ jsonrpc: '2.0', id, result });
+    res.json({
+      jsonrpc: '2.0',
+      id: id,
+      result: result
+    });
 
   } catch (error) {
-    res.json({ jsonrpc: '2.0', id: req.body.id, error: { code: -32603, message: error.message } });
+    console.error('RPC Error:', error);
+    res.json({
+      jsonrpc: '2.0',
+      id: req.body.id || null,
+      error: {
+        code: -32603,
+        message: error.message,
+        data: error.stack
+      }
+    });
   }
 });
 
-// Tool Call Handler (আপনার আগের লজিক ঠিক আছে)
+// Tool execution handler
 async function handleToolCall(params) {
-    const { name, arguments: args } = params;
-    try {
-        if (name === 'get_leads') {
-            const urlParams = new URLSearchParams({ apiKey: EVENTOFFICE_API_KEY });
-            const response = await axios.get(`${BASE_URL}/leads?${urlParams}`);
-            return { content: [{ type: 'text', text: JSON.stringify(response.data) }] };
+  const { name, arguments: args = {} } = params;
+
+  console.log(`Executing tool: ${name}`, args);
+
+  try {
+    switch (name) {
+      case 'get_leads': {
+        const urlParams = new URLSearchParams({ apiKey: EVENTOFFICE_API_KEY });
+        
+        if (args.status && args.status !== 'all') {
+          urlParams.append('status', args.status);
         }
-        // অন্যান্য টুলস...
-    } catch (e) { return { content: [{ type: 'text', text: e.message }], isError: true }; }
+        if (args.limit) {
+          urlParams.append('limit', Math.min(args.limit, 100));
+        }
+        
+        const response = await axios.get(`${BASE_URL}/leads?${urlParams}`);
+        
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify(response.data, null, 2)
+          }]
+        };
+      }
+
+      case 'create_lead': {
+        const leadData = {
+          customer: {
+            name: args.customer_name,
+            email: args.email,
+            phone: args.phone || ''
+          },
+          event_date: args.event_date,
+          event_type: args.event_type || '',
+          notes: args.notes || '',
+          status: 'pending'
+        };
+        
+        const response = await axios.post(
+          `${BASE_URL}/leads?apiKey=${EVENTOFFICE_API_KEY}`,
+          leadData
+        );
+        
+        return {
+          content: [{
+            type: 'text',
+            text: `✅ Lead created successfully!\n\nLead ID: ${response.data.id}\nCustomer: ${args.customer_name}\nEvent Date: ${args.event_date}`
+          }]
+        };
+      }
+
+      case 'get_inventory': {
+        const urlParams = new URLSearchParams({ apiKey: EVENTOFFICE_API_KEY });
+        
+        if (args.category) urlParams.append('category', args.category);
+        if (args.search) urlParams.append('search', args.search);
+        
+        const response = await axios.get(`${BASE_URL}/rentals?${urlParams}`);
+        
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify(response.data, null, 2)
+          }]
+        };
+      }
+
+      default:
+        throw new Error(`Unknown tool: ${name}`);
+    }
+  } catch (error) {
+    console.error('Tool execution error:', error.message);
+    
+    return {
+      content: [{
+        type: 'text',
+        text: `Error: ${error.response?.data?.message || error.message}`
+      }],
+      isError: true
+    };
+  }
 }
 
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'EventOffice MCP Server',
+    timestamp: new Date().toISOString(),
+    connections: connections.size,
+    eventoffice_api_configured: !!EVENTOFFICE_API_KEY
+  });
+});
 
+// Test EventOffice connection
+app.get('/test', async (req, res) => {
+  try {
+    const response = await axios.get(
+      `${BASE_URL}/rentals?apiKey=${EVENTOFFICE_API_KEY}&limit=1`
+    );
+    
+    res.json({
+      status: 'EventOffice API Connected ✅',
+      message: 'Successfully connected to EventOffice',
+      sample_data: response.data
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'EventOffice API Error ❌',
+      error: error.message,
+      details: error.response?.data
+    });
+  }
+});
+
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({
+    name: 'EventOffice MCP Server',
+    version: '1.0.0',
+    status: 'running',
+    endpoints: {
+      sse: '/sse',
+      rpc: '/rpc',
+      health: '/health',
+      test: '/test'
+    }
+  });
+});
+
+// Start server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log('='.repeat(50));
+  console.log('🚀 EventOffice MCP Server Started');
+  console.log('='.repeat(50));
+  console.log(`📡 Server URL: http://0.0.0.0:${PORT}`);
+  console.log(`🔌 SSE Endpoint: http://0.0.0.0:${PORT}/sse`);
+  console.log(`💬 RPC Endpoint: http://0.0.0.0:${PORT}/rpc`);
+  console.log(`❤️  Health Check: http://0.0.0.0:${PORT}/health`);
+  console.log(`🧪 Test API: http://0.0.0.0:${PORT}/test`);
+  console.log('='.repeat(50));
+  console.log(`EventOffice API Key: ${EVENTOFFICE_API_KEY ? '✅ Configured' : '❌ Missing'}`);
+  console.log('='.repeat(50));
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, closing server...');
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
 });

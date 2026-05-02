@@ -1,27 +1,20 @@
 {
   "name": "eventoffice-mcp-server",
   "version": "1.0.0",
-  "description": "MCP server for EventOffice integration",
+  "description": "MCP server for EventOffice integration with Claude.ai",
   "type": "module",
   "main": "index.js",
-  "bin": {
-    "eventoffice-mcp": "./index.js"
-  },
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "node --watch index.js"
   },
-  "keywords": [
-    "mcp",
-    "eventoffice",
-    "claude"
-  ],
-  "author": "Your Name",
+  "keywords": ["mcp", "eventoffice", "claude", "ai"],
+  "author": "Naf",
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^0.5.0",
-    "axios": "^1.15.2",
-    "cors": "^2.8.6",
-    "dotenv": "^16.6.1",
-    "express": "^5.2.1"
+    "axios": "^1.6.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.0",
+    "express": "^4.18.0"
   }
 }
