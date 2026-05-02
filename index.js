@@ -30,10 +30,18 @@ app.get('/sse', (req, res) => {
     'X-Accel-Buffering': 'no'
   });
 
-  // ১. প্রথমেই এন্ডপয়েন্ট মেসেজ পাঠাতে হবে (এটি জরুরি)
+ app.get('/sse', (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no' // রেলওয়ের বাফারিং বন্ধ করতে এটি মাস্ট
+  });
+
+  // ১. প্রথমেই এই বিশেষ ইভেন্টটি পাঠাতে হবে
   res.write(`event: endpoint\ndata: /message\n\n`); 
 
-  // ২. ইনপুট স্কিমা বা ইনিশিয়ালাইজেশন মেসেজ
+  // ২. এরপর তোমার ইনট মেসেজ (initMessage) পাঠাও
   const initMessage = {
     jsonrpc: '2.0',
     method: 'initialized',
@@ -45,10 +53,10 @@ app.get('/sse', (req, res) => {
   };
   res.write(`data: ${JSON.stringify(initMessage)}\n\n`);
 
-  // ৩. কানেকশন সচল রাখতে হার্টবিট
+  // ৩. হার্টবিট ইন্টারভাল (৩০ সেকেন্ডের বদলে ১৫ সেকেন্ড করো, রেলওয়েতে কানেকশন ড্রপ রোধে)
   const keepAlive = setInterval(() => {
     res.write(':keepalive\n\n');
-  }, 30000);
+  }, 15000);
 
   req.on('close', () => {
     clearInterval(keepAlive);
