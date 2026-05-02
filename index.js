@@ -22,6 +22,7 @@ const SERVER_VERSION = '1.0.0';
 const PROTOCOL_VERSION = '2024-11-05';
 
 const connections = new Map();
+const sessions = new Map();
 
 function sendSseEvent(res, event, data) {
   if (event) {
@@ -98,6 +99,33 @@ function createJsonRpcError(id, code, message, data) {
   }
 
   return error;
+}
+
+function getAcceptHeader(req) {
+  return String(req.headers.accept || '');
+}
+
+function wantsEventStream(req) {
+  return getAcceptHeader(req).includes('text/event-stream');
+}
+
+function getSessionId(req) {
+  return req.get('Mcp-Session-Id') || req.get('mcp-session-id') || null;
+}
+
+function ensureSession(req, res) {
+  const incomingSessionId = getSessionId(req);
+
+  if (incomingSessionId && sessions.has(incomingSessionId)) {
+    return incomingSessionId;
+  }
+
+  const sessionId = randomUUID();
+  sessions.set(sessionId, {
+    createdAt: Date.now()
+  });
+  res.setHeader('Mcp-Session-Id', sessionId);
+  return sessionId;
 }
 
 async function handleRpcMessage(message) {
@@ -206,6 +234,90 @@ app.get('/sse', (req, res) => {
   });
 });
 
+function openMcpSseStream(req, res) {
+  const sessionId = ensureSession(req, res);
+  const messageUrl = `${req.protocol}://${req.get('host')}/mcp`;
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  const keepAliveInterval = setInterval(() => {
+    sendSseEvent(res, 'ping', {});
+  }, 30000);
+
+  connections.set(sessionId, {
+    res,
+    keepAliveInterval
+  });
+
+  sendSseEvent(res, 'endpoint', messageUrl);
+
+  req.on('close', () => {
+    const session = connections.get(sessionId);
+    if (session?.keepAliveInterval) {
+      clearInterval(session.keepAliveInterval);
+    }
+    connections.delete(sessionId);
+    res.end();
+  });
+}
+
+async function handleMcpPost(req, res) {
+  try {
+    console.log('Received MCP HTTP request:', { method: req.body?.method, params: req.body?.params });
+
+    const response = await handleRpcMessage(req.body);
+    const sessionId = ensureSession(req, res);
+
+    if (response === null) {
+      return res.sendStatus(202);
+    }
+
+    if (response.result && req.body?.method === 'initialize') {
+      res.setHeader('Mcp-Session-Id', sessionId);
+      res.setHeader('MCP-Protocol-Version', PROTOCOL_VERSION);
+    }
+
+    const acceptHeader = getAcceptHeader(req);
+    if (acceptHeader.includes('text/event-stream')) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.flushHeaders?.();
+      sendSseEvent(res, 'message', response);
+      return res.end();
+    }
+
+    return res.json(response);
+  } catch (error) {
+    console.error('MCP POST error:', error);
+    return res.status(500).json(createJsonRpcError(req.body?.id, -32603, error.message, error.stack));
+  }
+}
+
+function handleMcpGet(req, res) {
+  if (!wantsEventStream(req)) {
+    return res.json({
+      name: SERVER_NAME,
+      version: SERVER_VERSION,
+      status: 'running',
+      endpoints: {
+        mcp: '/mcp',
+        sse: '/sse',
+        message: '/message',
+        health: '/health',
+        test: '/test'
+      }
+    });
+  }
+
+  return openMcpSseStream(req, res);
+}
+
 app.post('/rpc', express.json(), async (req, res) => {
   try {
     console.log('Received RPC request:', { method: req.body?.method, params: req.body?.params });
@@ -249,6 +361,30 @@ app.post('/message', express.text({ type: '*/*' }), async (req, res) => {
     console.error('Message transport error:', error);
     return res.status(400).json({ error: error.message });
   }
+});
+
+app.all('/mcp', express.json(), async (req, res) => {
+  if (req.method === 'GET') {
+    return handleMcpGet(req, res);
+  }
+
+  if (req.method === 'POST') {
+    return handleMcpPost(req, res);
+  }
+
+  return res.status(405).end();
+});
+
+app.all('/', express.json(), async (req, res) => {
+  if (req.method === 'GET') {
+    return handleMcpGet(req, res);
+  }
+
+  if (req.method === 'POST') {
+    return handleMcpPost(req, res);
+  }
+
+  return res.status(405).end();
 });
 
 async function handleToolCall(params) {
@@ -404,6 +540,7 @@ app.get('/', (req, res) => {
     version: SERVER_VERSION,
     status: 'running',
     endpoints: {
+      mcp: '/mcp',
       sse: '/sse',
       message: '/message',
       rpc: '/rpc',
@@ -419,6 +556,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('EventOffice MCP Server Started');
   console.log('='.repeat(50));
   console.log(`Server URL: http://0.0.0.0:${PORT}`);
+  console.log(`MCP Endpoint: http://0.0.0.0:${PORT}/mcp`);
   console.log(`SSE Endpoint: http://0.0.0.0:${PORT}/sse`);
   console.log(`Message Endpoint: http://0.0.0.0:${PORT}/message`);
   console.log(`RPC Endpoint: http://0.0.0.0:${PORT}/rpc`);
@@ -439,6 +577,8 @@ function shutdown(signal) {
     session.res.end();
     connections.delete(sessionId);
   }
+
+  sessions.clear();
 
   server.close(() => {
     console.log('Server closed');
