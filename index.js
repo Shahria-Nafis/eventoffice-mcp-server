@@ -7,7 +7,7 @@ dotenv.config();
 
 const app = express();
 
-// CORS setup - Claude.ai এর জন্য
+// CORS setup
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -23,22 +23,19 @@ const BASE_URL = 'https://rental.software/api6';
 // Store active connections
 const connections = new Map();
 
-// SSE endpoint - Claude.ai এখানে connect করবে
+// SSE endpoint
 app.get('/sse', (req, res) => {
   console.log('New SSE connection established');
 
-  // Set SSE headers
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
+  res.setHeader('X-Accel-Buffering', 'no');
 
-  // Generate connection ID
   const connectionId = Date.now().toString();
   connections.set(connectionId, res);
 
-  // Send initial connection success
   const initEvent = {
     jsonrpc: '2.0',
     method: 'connected',
@@ -53,12 +50,10 @@ app.get('/sse', (req, res) => {
   
   res.write(`data: ${JSON.stringify(initEvent)}\n\n`);
 
-  // Keep-alive ping every 30 seconds
   const keepAliveInterval = setInterval(() => {
     res.write(':ping\n\n');
   }, 30000);
 
-  // Clean up on connection close
   req.on('close', () => {
     console.log('SSE connection closed');
     clearInterval(keepAliveInterval);
@@ -67,88 +62,80 @@ app.get('/sse', (req, res) => {
   });
 });
 
-// Main RPC endpoint - Claude.ai এখানে requests পাঠাবে
+// RPC endpoint
 app.post('/rpc', async (req, res) => {
   try {
     const { jsonrpc, id, method, params } = req.body;
-
     console.log('Received RPC request:', { method, params });
 
     let result;
 
-    switch (method) {
-      case 'initialize':
-        result = {
-          protocolVersion: '2024-11-05',
-          capabilities: {
-            tools: {}
-          },
-          serverInfo: {
-            name: 'eventoffice-mcp-server',
-            version: '1.0.0'
-          }
-        };
-        break;
-
-      case 'tools/list':
-        result = {
-          tools: [
-            {
-              name: 'get_leads',
-              description: 'Get leads/events from EventOffice. Can filter by status (booked, pending, cancelled, tentative).',
-              inputSchema: {
-                type: 'object',
-                properties: {
-                  status: {
-                    type: 'string',
-                    description: 'Filter by lead status',
-                    enum: ['booked', 'pending', 'cancelled', 'tentative', 'all']
-                  },
-                  limit: {
-                    type: 'number',
-                    description: 'Number of results to return',
-                    default: 20
-                  }
-                }
-              }
-            },
-            {
-              name: 'create_lead',
-              description: 'Create a new lead/event in EventOffice',
-              inputSchema: {
-                type: 'object',
-                properties: {
-                  customer_name: { type: 'string', description: 'Customer full name' },
-                  email: { type: 'string', description: 'Customer email' },
-                  phone: { type: 'string', description: 'Phone number (optional)' },
-                  event_date: { type: 'string', description: 'Event date (YYYY-MM-DD)' },
-                  event_type: { type: 'string', description: 'Type of event' },
-                  notes: { type: 'string', description: 'Additional notes' }
+    if (method === 'initialize') {
+      result = {
+        protocolVersion: '2024-11-05',
+        capabilities: {
+          tools: {}
+        },
+        serverInfo: {
+          name: 'eventoffice-mcp-server',
+          version: '1.0.0'
+        }
+      };
+    } else if (method === 'tools/list') {
+      result = {
+        tools: [
+          {
+            name: 'get_leads',
+            description: 'Get leads/events from EventOffice. Can filter by status (booked, pending, cancelled, tentative).',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                status: {
+                  type: 'string',
+                  description: 'Filter by lead status',
+                  enum: ['booked', 'pending', 'cancelled', 'tentative', 'all']
                 },
-                required: ['customer_name', 'email', 'event_date']
-              }
-            },
-            {
-              name: 'get_inventory',
-              description: 'Get rental inventory items from EventOffice',
-              inputSchema: {
-                type: 'object',
-                properties: {
-                  category: { type: 'string', description: 'Filter by category' },
-                  search: { type: 'string', description: 'Search by name' }
+                limit: {
+                  type: 'number',
+                  description: 'Number of results to return',
+                  default: 20
                 }
               }
             }
-          ]
-        };
-        break;
-
-      case 'tools/call':
-        result = await handleToolCall(params);
-        break;
-
-      default:
-        throw new Error(`Unknown method: ${method}`);
+          },
+          {
+            name: 'create_lead',
+            description: 'Create a new lead/event in EventOffice',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                customer_name: { type: 'string', description: 'Customer full name' },
+                email: { type: 'string', description: 'Customer email' },
+                phone: { type: 'string', description: 'Phone number (optional)' },
+                event_date: { type: 'string', description: 'Event date (YYYY-MM-DD)' },
+                event_type: { type: 'string', description: 'Type of event' },
+                notes: { type: 'string', description: 'Additional notes' }
+              },
+              required: ['customer_name', 'email', 'event_date']
+            }
+          },
+          {
+            name: 'get_inventory',
+            description: 'Get rental inventory items from EventOffice',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                category: { type: 'string', description: 'Filter by category' },
+                search: { type: 'string', description: 'Search by name' }
+              }
+            }
+          }
+        ]
+      };
+    } else if (method === 'tools/call') {
+      result = await handleToolCall(params);
+    } else {
+      throw new Error(`Unknown method: ${method}`);
     }
 
     res.json({
@@ -173,76 +160,70 @@ app.post('/rpc', async (req, res) => {
 
 // Tool execution handler
 async function handleToolCall(params) {
-  const { name, arguments: args = {} } = params;
+  const { name, arguments: args } = params;
+  const toolArgs = args || {};
 
-  console.log(`Executing tool: ${name}`, args);
+  console.log(`Executing tool: ${name}`, toolArgs);
 
   try {
-    switch (name) {
-      case 'get_leads': {
-        const urlParams = new URLSearchParams({ apiKey: EVENTOFFICE_API_KEY });
-        
-        if (args.status && args.status !== 'all') {
-          urlParams.append('status', args.status);
-        }
-        if (args.limit) {
-          urlParams.append('limit', Math.min(args.limit, 100));
-        }
-        
-        const response = await axios.get(`${BASE_URL}/leads?${urlParams}`);
-        
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify(response.data, null, 2)
-          }]
-        };
+    if (name === 'get_leads') {
+      const urlParams = new URLSearchParams({ apiKey: EVENTOFFICE_API_KEY });
+      
+      if (toolArgs.status && toolArgs.status !== 'all') {
+        urlParams.append('status', toolArgs.status);
       }
-
-      case 'create_lead': {
-        const leadData = {
-          customer: {
-            name: args.customer_name,
-            email: args.email,
-            phone: args.phone || ''
-          },
-          event_date: args.event_date,
-          event_type: args.event_type || '',
-          notes: args.notes || '',
-          status: 'pending'
-        };
-        
-        const response = await axios.post(
-          `${BASE_URL}/leads?apiKey=${EVENTOFFICE_API_KEY}`,
-          leadData
-        );
-        
-        return {
-          content: [{
-            type: 'text',
-            text: `✅ Lead created successfully!\n\nLead ID: ${response.data.id}\nCustomer: ${args.customer_name}\nEvent Date: ${args.event_date}`
-          }]
-        };
+      if (toolArgs.limit) {
+        urlParams.append('limit', Math.min(toolArgs.limit, 100));
       }
-
-      case 'get_inventory': {
-        const urlParams = new URLSearchParams({ apiKey: EVENTOFFICE_API_KEY });
-        
-        if (args.category) urlParams.append('category', args.category);
-        if (args.search) urlParams.append('search', args.search);
-        
-        const response = await axios.get(`${BASE_URL}/rentals?${urlParams}`);
-        
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify(response.data, null, 2)
-          }]
-        };
-      }
-
-      default:
-        throw new Error(`Unknown tool: ${name}`);
+      
+      const response = await axios.get(`${BASE_URL}/leads?${urlParams}`);
+      
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify(response.data, null, 2)
+        }]
+      };
+    } else if (name === 'create_lead') {
+      const leadData = {
+        customer: {
+          name: toolArgs.customer_name,
+          email: toolArgs.email,
+          phone: toolArgs.phone || ''
+        },
+        event_date: toolArgs.event_date,
+        event_type: toolArgs.event_type || '',
+        notes: toolArgs.notes || '',
+        status: 'pending'
+      };
+      
+      const response = await axios.post(
+        `${BASE_URL}/leads?apiKey=${EVENTOFFICE_API_KEY}`,
+        leadData
+      );
+      
+      return {
+        content: [{
+          type: 'text',
+          text: `✅ Lead created successfully!\n\nLead ID: ${response.data.id}\nCustomer: ${toolArgs.customer_name}\nEvent Date: ${toolArgs.event_date}`
+        }]
+      };
+    } else if (name === 'get_inventory') {
+      const urlParams = new URLSearchParams({ apiKey: EVENTOFFICE_API_KEY });
+      
+      if (toolArgs.category) urlParams.append('category', toolArgs.category);
+      if (toolArgs.search) urlParams.append('search', toolArgs.search);
+      
+      const response = await axios.get(`${BASE_URL}/rentals?${urlParams}`);
+      
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify(response.data, null, 2)
+        }]
+      };
+    } else {
+      throw new Error(`Unknown tool: ${name}`);
     }
   } catch (error) {
     console.error('Tool execution error:', error.message);
