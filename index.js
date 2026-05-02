@@ -51,7 +51,7 @@ app.get('/sse', (req, res) => {
   res.write(`data: ${JSON.stringify(initEvent)}\n\n`);
 
   const keepAliveInterval = setInterval(() => {
-    res.write(':ping\n\n');
+    res.write('event: ping\ndata: {}\n\n');
   }, 30000);
 
   req.on('close', () => {
@@ -67,6 +67,17 @@ app.post('/rpc', async (req, res) => {
   try {
     const { jsonrpc, id, method, params } = req.body;
     console.log('Received RPC request:', { method, params });
+
+    if (id === undefined || id === null) {
+      return res.json({
+        jsonrpc: '2.0',
+        id: null,
+        error: {
+          code: -32600,
+          message: 'Invalid Request: missing id'
+        }
+      });
+    }
 
     let result;
 
@@ -148,7 +159,7 @@ app.post('/rpc', async (req, res) => {
     console.error('RPC Error:', error);
     res.json({
       jsonrpc: '2.0',
-      id: req.body.id || null,
+      id: req.body?.id ?? null,
       error: {
         code: -32603,
         message: error.message,
@@ -160,10 +171,21 @@ app.post('/rpc', async (req, res) => {
 
 // Tool execution handler
 async function handleToolCall(params) {
+  if (!EVENTOFFICE_API_KEY) {
+    return {
+      content: [{
+        type: 'text',
+        text: 'Error: EVENTOFFICE_API_KEY is not configured. Please set the environment variable.'
+      }],
+      isError: true
+    };
+  }
+
   const { name, arguments: args } = params;
   const toolArgs = args || {};
 
   console.log(`Executing tool: ${name}`, toolArgs);
+
 
   try {
     if (name === 'get_leads') {
