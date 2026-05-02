@@ -7,50 +7,28 @@ dotenv.config();
 
 const app = express();
 
-// CORS - Claude.ai থেকে access করার জন্য
 app.use(cors({
-  origin: [
-    'https://claude.ai', 
-    'https://staging.claude.ai', 
-    'https://api.claude.ai'
-  ],
+  origin: ['https://claude.ai', 'https://staging.claude.ai'], 
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-mcp-protocol-version'],
-  exposedHeaders: ['x-mcp-protocol-version'],
-  credentials: true
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-mcp-protocol-version'], 
+  exposedHeaders: ['x-mcp-protocol-version']
 }));
-
 app.use(express.json());
 
 const EVENTOFFICE_API_KEY = process.env.EVENTOFFICE_API_KEY;
 const BASE_URL = 'https://rental.software/api6';
 
 app.get('/sse', (req, res) => {
-  // ১. প্রয়োজনীয় হেডার সেট করা
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': '*',
-    'X-Accel-Buffering': 'no' // রেলওয়ে বা এনজিনিক্স বাফারিং বন্ধ করার জন্য এটি অত্যন্ত জরুরি
+    'X-Accel-Buffering': 'no' // এটি রেলওয়ের জন্য সবচেয়ে গুরুত্বপূর্ণ
   });
 
-  // ২. Claude-কে জানানো যে মেসেজ পাঠানোর জন্য কোন পাথটি ব্যবহার করতে হবে
-  // এটি একটি স্পেশাল ফরম্যাট যা Claude.ai আশা করে
-  res.write(`event: endpoint\ndata: /message\n\n`);
-
-  // ৩. কানেকশন সচল রাখতে একটি হার্টবিট পাঠানো
-  const keepAlive = setInterval(() => {
-    res.write(':keepalive\n\n');
-  }, 15000);
-
-  // ৪. কানেকশন বন্ধ হলে ইন্টারভাল পরিষ্কার করা
-  req.on('close', () => {
-    clearInterval(keepAlive);
-    res.end();
-  });
+  // Claude কানেক্ট হওয়ার সাথে সাথে এই মেসেজটি পাঠাতে হবে
+  res.write(`event: endpoint\ndata: /message\n\n`); 
 });
-
   // Send initialization
   const initMessage = {
     jsonrpc: '2.0',
