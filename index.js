@@ -1,283 +1,314 @@
-#!/usr/bin/env node
-
-import 'dotenv/config';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import express from 'express';
 import axios from 'axios';
+import cors from 'cors';
+import dotenv from 'dotenv';
 
-const API_KEY = process.env.EVENTOFFICE_API_KEY;
+dotenv.config();
+
+const app = express();
+
+// CORS - Claude.ai থেকে access করার জন্য
+app.use(cors({
+  origin: '*', // Production এ specific domain দিবে
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+app.use(express.json());
+
+const EVENTOFFICE_API_KEY = process.env.EVENTOFFICE_API_KEY;
 const BASE_URL = 'https://rental.software/api6';
 
-if (!API_KEY) {
-  console.error('Error: EVENTOFFICE_API_KEY environment variable is required');
-  process.exit(1);
-}
+// MCP Server-Sent Events endpoint
+app.get('/sse', async (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
 
-class EventOfficeServer {
-  constructor() {
-    this.server = new Server(
-      {
-        name: 'eventoffice-mcp-server',
-        version: '1.0.0',
+  // Send initialization
+  const initMessage = {
+    jsonrpc: '2.0',
+    method: 'initialized',
+    params: {
+      protocolVersion: '2024-11-05',
+      capabilities: {
+        tools: {}
       },
-      {
-        capabilities: {
-          tools: {},
-        },
+      serverInfo: {
+        name: 'eventoffice-mcp-server',
+        version: '1.0.0'
       }
-    );
+    }
+  };
 
-    this.setupToolHandlers();
-    this.server.onerror = (error) => console.error('[MCP Error]', error);
-    process.on('SIGINT', async () => {
-      await this.server.close();
-      process.exit(0);
+  res.write(`data: ${JSON.stringify(initMessage)}\n\n`);
+
+  // Keep connection alive
+  const keepAlive = setInterval(() => {
+    res.write(':keepalive\n\n');
+  }, 30000);
+
+  req.on('close', () => {
+    clearInterval(keepAlive);
+    res.end();
+  });
+});
+
+// MCP JSON-RPC endpoint
+app.post('/message', async (req, res) => {
+  try {
+    const { jsonrpc, id, method, params } = req.body;
+
+    console.log('Received request:', { method, params });
+
+    let result;
+
+    switch (method) {
+      case 'tools/list':
+        result = {
+          tools: [
+            {
+              name: 'get_leads',
+              description: 'Get leads from EventOffice. Can filter by status.',
+              inputSchema: {
+                type: 'object',
+                properties: {
+                  status: { 
+                    type: 'string', 
+                    description: 'Filter by status (booked, pending, cancelled, tentative)',
+                    enum: ['booked', 'pending', 'cancelled', 'tentative', 'all']
+                  },
+                  limit: { 
+                    type: 'number', 
+                    description: 'Number of results (max 100)',
+                    default: 20
+                  }
+                }
+              }
+            },
+            {
+              name: 'create_lead',
+              description: 'Create a new lead/event in EventOffice',
+              inputSchema: {
+                type: 'object',
+                properties: {
+                  customer_name: { type: 'string', description: 'Customer full name' },
+                  email: { type: 'string', description: 'Customer email' },
+                  phone: { type: 'string', description: 'Phone number (optional)' },
+                  event_date: { type: 'string', description: 'Event date (YYYY-MM-DD)' },
+                  event_type: { type: 'string', description: 'Event type (wedding, birthday, etc.)' },
+                  notes: { type: 'string', description: 'Additional notes' }
+                },
+                required: ['customer_name', 'email', 'event_date']
+              }
+            },
+            {
+              name: 'get_inventory',
+              description: 'Get rental inventory items from EventOffice',
+              inputSchema: {
+                type: 'object',
+                properties: {
+                  category: { type: 'string', description: 'Filter by category' },
+                  search: { type: 'string', description: 'Search by name' }
+                }
+              }
+            },
+            {
+              name: 'get_customers',
+              description: 'Search customers in EventOffice',
+              inputSchema: {
+                type: 'object',
+                properties: {
+                  search: { type: 'string', description: 'Search by name/email' },
+                  limit: { type: 'number', description: 'Number of results', default: 20 }
+                }
+              }
+            },
+            {
+              name: 'get_lead_details',
+              description: 'Get detailed info about a specific lead',
+              inputSchema: {
+                type: 'object',
+                properties: {
+                  lead_id: { type: 'string', description: 'Lead ID' }
+                },
+                required: ['lead_id']
+              }
+            }
+          ]
+        };
+        break;
+
+      case 'tools/call':
+        result = await handleToolCall(params);
+        break;
+
+      default:
+        throw new Error(`Unknown method: ${method}`);
+    }
+
+    res.json({
+      jsonrpc: '2.0',
+      id: id,
+      result: result
+    });
+
+  } catch (error) {
+    console.error('Error:', error);
+    res.json({
+      jsonrpc: '2.0',
+      id: req.body.id,
+      error: {
+        code: -32603,
+        message: error.message
+      }
     });
   }
+});
 
-  setupToolHandlers() {
-    // List all available tools
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: [
-        {
-          name: 'get_leads',
-          description: 'Get leads from EventOffice. You can filter by status (booked, pending, cancelled, etc.)',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              status: {
-                type: 'string',
-                description: 'Filter by lead status (optional)',
-                enum: ['booked', 'pending', 'cancelled', 'tentative']
-              },
-              limit: {
-                type: 'number',
-                description: 'Number of results to return (default: 10)',
-                default: 10
-              }
-            }
-          },
-        },
-        {
-          name: 'create_lead',
-          description: 'Create a new lead/event in EventOffice',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              customer_name: {
-                type: 'string',
-                description: 'Customer full name'
-              },
-              email: {
-                type: 'string',
-                description: 'Customer email address'
-              },
-              phone: {
-                type: 'string',
-                description: 'Customer phone number (optional)'
-              },
-              event_date: {
-                type: 'string',
-                description: 'Event date in YYYY-MM-DD format'
-              },
-              event_type: {
-                type: 'string',
-                description: 'Type of event (wedding, birthday, corporate, etc.)'
-              },
-              notes: {
-                type: 'string',
-                description: 'Additional notes or requirements'
-              }
-            },
-            required: ['customer_name', 'email', 'event_date']
-          },
-        },
-        {
-          name: 'get_inventory',
-          description: 'Get rental inventory/items from EventOffice',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              category: {
-                type: 'string',
-                description: 'Filter by category name (optional)'
-              },
-              search: {
-                type: 'string',
-                description: 'Search by item name (optional)'
-              }
-            }
-          },
-        },
-        {
-          name: 'get_customers',
-          description: 'Get customer list from EventOffice',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              search: {
-                type: 'string',
-                description: 'Search by customer name or email'
-              },
-              limit: {
-                type: 'number',
-                description: 'Number of results (default: 10)',
-                default: 10
-              }
-            }
-          },
-        },
-        {
-          name: 'get_lead_details',
-          description: 'Get detailed information about a specific lead by ID',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              lead_id: {
-                type: 'string',
-                description: 'The EventOffice lead ID'
-              }
-            },
-            required: ['lead_id']
-          },
+// Handle tool execution
+async function handleToolCall(params) {
+  const { name, arguments: args } = params;
+
+  console.log(`Executing tool: ${name}`, args);
+
+  try {
+    switch (name) {
+      case 'get_leads': {
+        const urlParams = new URLSearchParams({ apiKey: EVENTOFFICE_API_KEY });
+        if (args.status && args.status !== 'all') {
+          urlParams.append('status', args.status);
         }
-      ],
-    }));
-
-    // Handle tool calls
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const { name, arguments: args } = request.params;
-
-      try {
-        switch (name) {
-          case 'get_leads':
-            return await this.getLeads(args);
-          case 'create_lead':
-            return await this.createLead(args);
-          case 'get_inventory':
-            return await this.getInventory(args);
-          case 'get_customers':
-            return await this.getCustomers(args);
-          case 'get_lead_details':
-            return await this.getLeadDetails(args);
-          default:
-            throw new Error(`Unknown tool: ${name}`);
+        if (args.limit) {
+          urlParams.append('limit', Math.min(args.limit, 100));
         }
-      } catch (error) {
+        
+        const response = await axios.get(`${BASE_URL}/leads?${urlParams}`);
+        
         return {
-          content: [
-            {
-              type: 'text',
-              text: `Error: ${error.message}`
-            }
-          ],
-          isError: true,
+          content: [{
+            type: 'text',
+            text: JSON.stringify(response.data, null, 2)
+          }]
         };
       }
-    });
-  }
 
-  async getLeads(args) {
-    const params = new URLSearchParams({ apiKey: API_KEY });
-    if (args.status) params.append('status', args.status);
-    if (args.limit) params.append('limit', args.limit);
+      case 'create_lead': {
+        const leadData = {
+          customer: {
+            name: args.customer_name,
+            email: args.email,
+            phone: args.phone || ''
+          },
+          event_date: args.event_date,
+          event_type: args.event_type || '',
+          notes: args.notes || '',
+          status: 'pending'
+        };
+        
+        const response = await axios.post(
+          `${BASE_URL}/leads?apiKey=${EVENTOFFICE_API_KEY}`,
+          leadData
+        );
+        
+        return {
+          content: [{
+            type: 'text',
+            text: `✅ Lead created successfully!\n\nLead ID: ${response.data.id || 'N/A'}\nCustomer: ${args.customer_name}\nEvent Date: ${args.event_date}\n\n${JSON.stringify(response.data, null, 2)}`
+          }]
+        };
+      }
 
-    const response = await axios.get(`${BASE_URL}/leads?${params}`);
-    
+      case 'get_inventory': {
+        const urlParams = new URLSearchParams({ apiKey: EVENTOFFICE_API_KEY });
+        if (args.category) urlParams.append('category', args.category);
+        if (args.search) urlParams.append('search', args.search);
+        
+        const response = await axios.get(`${BASE_URL}/rentals?${urlParams}`);
+        
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify(response.data, null, 2)
+          }]
+        };
+      }
+
+      case 'get_customers': {
+        const urlParams = new URLSearchParams({ apiKey: EVENTOFFICE_API_KEY });
+        if (args.search) urlParams.append('search', args.search);
+        if (args.limit) urlParams.append('limit', args.limit);
+        
+        const response = await axios.get(`${BASE_URL}/customers?${urlParams}`);
+        
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify(response.data, null, 2)
+          }]
+        };
+      }
+
+      case 'get_lead_details': {
+        const response = await axios.get(
+          `${BASE_URL}/leads/${args.lead_id}?apiKey=${EVENTOFFICE_API_KEY}&_body=true`
+        );
+        
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify(response.data, null, 2)
+          }]
+        };
+      }
+
+      default:
+        throw new Error(`Unknown tool: ${name}`);
+    }
+  } catch (error) {
+    console.error(`Tool execution error:`, error.message);
     return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(response.data, null, 2)
-        }
-      ],
+      content: [{
+        type: 'text',
+        text: `Error: ${error.response?.data?.message || error.message}`
+      }],
+      isError: true
     };
-  }
-
-  async createLead(args) {
-    const leadData = {
-      customer: {
-        name: args.customer_name,
-        email: args.email,
-        phone: args.phone || ''
-      },
-      event_date: args.event_date,
-      event_type: args.event_type || '',
-      notes: args.notes || '',
-      status: 'pending'
-    };
-
-    const response = await axios.post(
-      `${BASE_URL}/leads?apiKey=${API_KEY}`,
-      leadData
-    );
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: `✅ Lead created successfully!\n\nLead ID: ${response.data.id || 'N/A'}\nCustomer: ${args.customer_name}\nEvent Date: ${args.event_date}\n\nFull response:\n${JSON.stringify(response.data, null, 2)}`
-        }
-      ],
-    };
-  }
-
-  async getInventory(args) {
-    const params = new URLSearchParams({ apiKey: API_KEY });
-    if (args.category) params.append('category', args.category);
-    if (args.search) params.append('search', args.search);
-
-    const response = await axios.get(`${BASE_URL}/rentals?${params}`);
-    
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(response.data, null, 2)
-        }
-      ],
-    };
-  }
-
-  async getCustomers(args) {
-    const params = new URLSearchParams({ apiKey: API_KEY });
-    if (args.search) params.append('search', args.search);
-    if (args.limit) params.append('limit', args.limit);
-
-    const response = await axios.get(`${BASE_URL}/customers?${params}`);
-    
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(response.data, null, 2)
-        }
-      ],
-    };
-  }
-
-  async getLeadDetails(args) {
-    const response = await axios.get(
-      `${BASE_URL}/leads/${args.lead_id}?apiKey=${API_KEY}&_body=true`
-    );
-    
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(response.data, null, 2)
-        }
-      ],
-    };
-  }
-
-  async run() {
-    const transport = new StdioServerTransport();
-    await this.server.connect(transport);
-    console.error('EventOffice MCP server running on stdio');
   }
 }
 
-const server = new EventOfficeServer();
-server.run().catch(console.error);
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok',
+    service: 'EventOffice MCP Server',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Test endpoint
+app.get('/test', async (req, res) => {
+  try {
+    const response = await axios.get(
+      `${BASE_URL}/rentals?apiKey=${EVENTOFFICE_API_KEY}&limit=1`
+    );
+    res.json({
+      status: 'EventOffice API Connected ✅',
+      sample_data: response.data
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'EventOffice API Error ❌',
+      error: error.message
+    });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 EventOffice MCP Server running on port ${PORT}`);
+  console.log(`📡 SSE endpoint: http://localhost:${PORT}/sse`);
+  console.log(`💬 Message endpoint: http://localhost:${PORT}/message`);
+  console.log(`❤️  Health check: http://localhost:${PORT}/health`);
+});
