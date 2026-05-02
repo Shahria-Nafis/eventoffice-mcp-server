@@ -375,6 +375,18 @@ app.all('/mcp', express.json(), async (req, res) => {
   return res.status(405).end();
 });
 
+app.all('/mcp/', express.json(), async (req, res) => {
+  if (req.method === 'GET') {
+    return handleMcpGet(req, res);
+  }
+
+  if (req.method === 'POST') {
+    return handleMcpPost(req, res);
+  }
+
+  return res.status(405).end();
+});
+
 app.all('/', express.json(), async (req, res) => {
   if (req.method === 'GET') {
     return handleMcpGet(req, res);
@@ -385,6 +397,36 @@ app.all('/', express.json(), async (req, res) => {
   }
 
   return res.status(405).end();
+});
+
+app.use((req, res, next) => {
+  const normalizedPath = req.path.replace(/\/+$/, '') || '/';
+
+  if (normalizedPath === '/mcp') {
+    if (req.method === 'GET') {
+      return handleMcpGet(req, res);
+    }
+
+    if (req.method === 'POST') {
+      return handleMcpPost(req, res);
+    }
+
+    return res.status(405).end();
+  }
+
+  if (normalizedPath === '/') {
+    if (req.method === 'GET') {
+      return handleMcpGet(req, res);
+    }
+
+    if (req.method === 'POST') {
+      return handleMcpPost(req, res);
+    }
+
+    return res.status(405).end();
+  }
+
+  return next();
 });
 
 async function handleToolCall(params) {
